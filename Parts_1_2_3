@@ -1,0 +1,171 @@
+%% Inkjet Droplet: Unified Script (Parts 1–3) — FIXED
+% Part 1: Single droplet, no voltage (reference animation)
+% Part 2: Animate printing a vertical "I" with properly computed acceleration
+% Part 3: Compute & plot staircase voltage profile that achieves the same "I"
+clc; clear; close all;
+%% ------------------------ Master Parameters (SI) ------------------------
+P.Vx   = 20;          % horizontal velocity (m/s)
+P.y0   = 0;           % droplet gun vertical origin (m)
+P.D    = 3e-3;        % distance from gun to paper (m)
+P.L1   = 0.5e-3;      % capacitor length (m)
+P.x_cap_start = 1.25e-3;                % cap start (m)
+P.x_cap_end   = P.x_cap_start + P.L1;   % cap end (m)
+P.W    = 1e-3;        % plate gap (m)
+P.L2   = P.D - P.x_cap_end;             % distance from capacitor exit to paper (m)
+% Droplet physicals (for voltage computation)
+P.d    = 84e-6;       % diameter (m)
+P.rho  = 1000;        % density (kg/m^3)
+P.q    = -1.9e-10;    % charge (C)
+% Printing resolution and target line height (used in Part 2 animation)
+P.dpi  = 300;                     % dots per inch
+P.pitch = (1/P.dpi)*0.0254;       % drop spacing on paper (m)
+P.line_height_mm = 4.8;             % requested line height for animation (mm)
+P.dt = 1e-6;
+P.dt = min(P.dt, (P.L1/P.Vx)/400);     % e.g., ~400 samples across T
+% Derived timing
+T        = P.L1 / P.Vx;      % time inside capacitor
+t_after  = P.L2 / P.Vx;      % time after capacitor (to the paper)
+t_flight = P.D  / P.Vx;      % total flight time
+% Mass
+r  = P.d/2;
+m  = P.rho * (4/3)*pi*r^3;
+% Safe acceleration limit so droplet never touches plates while inside
+P.clearance = 0.1e-3;  % 50 microns safety clearance from each plate
+a_limit = (P.W/2 - P.clearance) / (0.5*T^2);    % so |y_inside| <= W/2
+y_inside_max = 0.5*a_limit*T^2;
+y_total_max  = y_inside_max + (a_limit*T)*t_after;
+Hmax         = 2*abs(y_total_max);     % maximum printable total height (m)
+% Number of dots we could print at 300dpi within Hmax
+Ndots_max = floor(Hmax / P.pitch) + 1;
+P.fire_period = (P.L1 / P.Vx);
+%% ------------------------ Feature Toggles ------------------------
+runPart1 = true;   % single droplet, no voltage
+runPart2 = true;   % animate vertical "I"
+runPart3 = true;   % staircase voltage profile plot
+%% ------------------------ Part 1: Single Droplet, No Voltage ------------------------
+if runPart1
+   fig1 = figure('Color','w','Name','Part 1: No Voltage');
+   ax1  = axes(fig1);
+   drawScene(ax1, P, 'Droplet Motion (No Voltage Applied)');
+   droplet = plot(ax1, 0, 0, 'bo','MarkerFaceColor','b','MarkerSize',6);
+   t = 0:P.dt:t_flight;
+   MM = 1e3; % meters -> mm
+   for i = 1:numel(t)
+       x = P.Vx * t(i); % m
+       y = P.y0;        % m (no vertical motion)
+       set(droplet, 'XData', x*MM, 'YData', y*MM);
+       if mod(i,10)==0, drawnow; end
+   end
+   fprintf('Part 1: Droplet reached the paper in %.3e s (%.3f ms)\n', t_flight, t_flight*1e3);
+end
+%% ------------------------ Part 2: Animation of Vertical "I" ------------------------
+% Uses mapping: y_target = ay*(0.5*T^2 + T*t_after)
+% => ay = y_target / (0.5*T^2 + T*t_after)
+% ---------------- Part 2 (overlapped) ----------------
+if runPart2
+   % Height request (still capped by Hmax)
+   Hreq = min(P.line_height_mm/1e3, Hmax);
+   N    = max(1, floor(Hreq/P.pitch) + 1);
+   ys   = ((0:N-1) - (N-1)/2) * P.pitch;
+   fig2 = figure('Color','w','Name','Part 2: Animate Vertical I (Fast Fire)');
+   ax2  = axes(fig2);
+   drawScene(ax2, P, 'Drawing Vertical "I" (Fast Fire)');
+   MM = 1e3;
+   % Precompute each droplet's acceleration
+   denom = 0.5*T^2 + T*t_after;
+   ay    = ys ./ denom;        % 1-by-N
+   % One plot handle per droplet
+   droplet = gobjects(1,N);
+   for k = 1:N
+       droplet(k) = plot(ax2, 0, P.y0*MM, 'bo', 'MarkerFaceColor','b', ...
+                         'MarkerSize', 5, 'LineWidth', 1);
+   end
+   % Global timeline runs long enough to launch all droplets
+   t_flight = P.D / P.Vx;
+   t_end_global = t_flight + (N-1)*P.fire_period;
+   tG = 0:P.dt:t_end_global;
+   for idx = 1:numel(tG)
+       tg = tG(idx);
+       for k = 1:N
+           t0  = (k-1) * P.fire_period;  % launch time of droplet k
+           tau = tg - t0;                % age of droplet k
+           if tau < 0 || tau > t_flight
+               % not yet launched or already hit paper -> skip updating
+               continue;
+           end
+           % Piecewise motion in droplet's own time axis 'tau'
+           x = P.Vx * tau;
+           if x <= P.x_cap_start
+               y = P.y0;
+           elseif x <= P.x_cap_end
+               t_in = tau - P.x_cap_start / P.Vx;
+               y    = P.y0 + 0.5 * ay(k) * t_in^2;
+           else
+               y_exit   = P.y0 + 0.5 * ay(k) * T^2;
+               Vy_final = ay(k) * T;
+               t_out    = tau - P.x_cap_end / P.Vx;
+               y        = y_exit + Vy_final * t_out;
+           end
+           set(droplet(k), 'XData', x*MM, 'YData', y*MM);
+       end
+       if mod(idx,10)==0, drawnow; end
+   end
+   total_time = t_end_global;  % now much shorter than N*t_flight
+   fprintf('Part 2 (Fast Fire): total time = %.3f ms (P.fire\\_period = %.3g s)\n', ...
+           total_time*1e3, P.fire_period);
+end
+%% ------------------------ Part 3: Staircase Voltage Profile ------------------------
+% Matches the same y-targets at 300 dpi, consistent with Part 2 kinematics
+if runPart3
+   Ndots   = Ndots_max;
+   ys_full = ((0:Ndots-1) - (Ndots-1)/2) * P.pitch;  % centered targets
+   voltageForY = @(y) ( (y / (0.5*T^2 + T*t_after)) * (m*P.W/P.q) ); % V = (ay*m*W)/q
+   Vs = arrayfun(voltageForY, ys_full);
+   t_edges = (0:Ndots) * T; % hold each voltage for T (time inside cap)
+   fig3 = figure('Color','w','Name','Part 3: Staircase Voltage Profile');
+   ax3  = axes(fig3); hold(ax3,'on'); grid(ax3,'on'); box(ax3,'on');
+   for k = 1:Ndots
+       plot(ax3, [t_edges(k) t_edges(k+1)], [Vs(k) Vs(k)], 'LineWidth', 2);
+   end
+   xlabel(ax3,'Time t [s]');
+   ylabel(ax3,'Applied Voltage V(t) [V]');
+   title(ax3, sprintf('Staircase Voltage for Vertical "I" at %d dpi (Safe Range)', P.dpi));
+   fprintf("Part 3 Summary:\n");
+   fprintf("  Ndots used: %d (max within safe height Hmax)\n", Ndots);
+   fprintf("  Hmax: %.2f mm\n", Hmax*1e3);
+   fprintf("  Per-droplet hold time T = %.3e s\n", T);
+   fprintf("  Total print time (staircase only) = %.3e s\n", Ndots*T + t_after);
+   fprintf("  Voltage range: %.1f V to %.1f V\n", min(Vs), max(Vs));
+end
+%% ------------------------ Local Functions (must be at end of file) ------------------------
+function drawScene(ax, P, ttl)
+   % Self-contained renderer for nozzle, capacitor, and paper.
+   MM = 1e3; % meters -> millimeters
+   axes(ax); hold(ax,'on'); grid(ax,'on'); axis(ax,'equal');
+   xlabel(ax,'Horizontal position (mm)');
+   ylabel(ax,'Vertical position (mm)');
+   title(ax, ttl);
+   set(ax,'XTick',0:0.5:4, 'GridAlpha', 0.3);
+   % droplet gun (mm coords)
+   gun_x = [-0.2 0 0 -0.2];
+   gun_y = [-0.2 -0.2 0.2 0.2];
+   fill(ax, gun_x, gun_y, [0.3 0.3 0.3], 'EdgeColor','k');
+   text(ax, -0.18, 0.25, 'Droplet Gun', 'FontSize', 10);
+   % capacitor plates (mm coords)
+   plate_thickness = 0.2; % mm visual thickness
+   x1 = P.x_cap_start*MM;
+   x2 = P.x_cap_end*MM;
+   gap_mm = P.W*MM;
+   topY =  gap_mm/2;
+   botY = -gap_mm/2;
+   fill(ax, [x1 x2 x2 x1], [topY topY topY+plate_thickness topY+plate_thickness], ...
+            [0.7 0.9 1], 'EdgeColor','k');
+   fill(ax, [x1 x2 x2 x1], [botY botY botY-plate_thickness botY-plate_thickness], ...
+            [0.7 0.9 1], 'EdgeColor','k');
+   text(ax, (x1+x2)/2 - 0.1, topY+0.6, 'Capacitor Plates', 'FontSize', 9);
+   % paper
+   xline(ax, P.D*MM, '--k', 'Paper', ...
+         'LabelHorizontalAlignment','right', 'LabelVerticalAlignment','middle', 'FontSize',9);
+   axis(ax, [-0.5 4 -2.5 2.5]);
+end
+
