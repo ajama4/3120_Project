@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Inkjet Droplet Physics Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #1a1a1a; color: white; }
+        
+        /* UI Panel */
+        #ui-container {
+            position: absolute; top: 0; left: 0; width: 420px; height: 100%;
+            background: rgba(0, 0, 0, 0.85); padding: 20px; box-sizing: border-box;
+            overflow-y: auto; border-right: 1px solid #444;
+            display: flex; flex-direction: column;
+        }
+        
+        canvas { display: block; }
+        h2 { font-size: 20px; color: #00d2ff; margin-top: 0; margin-bottom: 15px; }
+        h3 { font-size: 14px; color: #aaa; margin-bottom: 5px; margin-top: 15px; border-bottom: 1px solid #444; padding-bottom: 2px;}
+        
+        button {
+            width: 100%; padding: 10px; margin-bottom: 6px;
+            background: #333; color: white; border: 1px solid #555;
+            cursor: pointer; transition: 0.2s; font-weight: bold; font-size: 12px;
+            border-radius: 4px; text-align: left; padding-left: 15px;
+        }
+        button:hover { background: #00d2ff; color: #000; border-color: #00d2ff; }
+        
+        /* Highlight specific section buttons */
+        .sub-task-btn { border-left: 4px solid #555; }
+        .sub-task-btn:hover { border-left: 4px solid #fff; }
+
+        .stat-box {
+            background: #222; padding: 10px; margin-bottom: 10px;
+            border-left: 3px solid #00d2ff; font-size: 13px;
+            font-family: monospace; 
+            white-space: pre-wrap;
+            line-height: 1.5;
+            color: #ddd;
+            min-height: 40px;
+        }
+
+        #chart-wrapper { 
+            background: white; padding: 5px; margin-top: auto; 
+            border-radius: 4px; 
+            height: 300px; 
+            flex-shrink: 0;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<div id="ui-container">
+    <h2>Inkjet Simulation</h2>
+    
+    <h3>Standard Tasks</h3>
+    <button onclick="runTask1()">1. No Voltage (Calibration)</button>
+    <button onclick="runTask2()">2 & 3. Draw Letter 'I'</button>
+
+    <h3>4. Parameter Adjustments (Animated)</h3>
+    <button class="sub-task-btn" onclick="runTask4Sub('a')">4a. Distance L2 (3x)</button>
+    <button class="sub-task-btn" onclick="runTask4Sub('b')">4b. Capacitor L1 (2x)</button>
+    <button class="sub-task-btn" onclick="runTask4Sub('c')">4c. Droplet Dia (10x)</button>
+    <button class="sub-task-btn" onclick="runTask4Sub('d')">4d. Horiz Speed (2x)</button>
+    <button class="sub-task-btn" onclick="runTask4Sub('e')">4e. Charge Q (5x)</button>
+
+    <h3>Advanced</h3>
+    <button onclick="runTask5()">5. Draw Letter 'H' (2 Caps)</button>
+    
+    <button onclick="resetSim(); clearInk();" style="background:#422; border-color:#633; margin-top:15px; text-align:center;">Reset System</button>
+
+    <h3>Results & Log</h3>
+    <div id="output" class="stat-box">Ready. Select a task.</div>
+
+    <h3>Voltage Profile V(t)</h3>
+    <div id="chart-wrapper">
+        <canvas id="voltageChart"></canvas>
+    </div>
+</div>
+
+<script>
+/* --- PHYSICS CONFIGURATION --- */
+const DEFAULT_CONFIG = {
+    D: 3e-3,          // Distance to paper (m)
+    L1: 0.5e-3,       // Length of Cap 1 (m)
+    L2: 1.25e-3,      // Drift Length (m)
+    W: 1e-3,          // Plate separation (m)
+    d: 84e-6,         // Droplet Diameter (m)
+    vx: 20.0,         // Velocity X (m/s)
+    rho: 1000.0,      // Density (kg/m3)
+    q: -1.9e-10,      // Charge (C)
+    dpi: 300
+};
+
+// State
+let cfg = { ...DEFAULT_CONFIG };
+let mass = 0;
+let activeDroplets = [];
+let inkMarks = [];
+let isDrawingH = false;
+let scene, camera, renderer, paperMesh;
+let cap1Group, cap2Group;
+let chartInstance = null;
+
+function initPhysics() {
+    const r = cfg.d / 2;
+    const vol = (4/3) * Math.PI * Math.pow(r, 3);
+    mass = cfg.rho * vol;
+}
+
+/* --- THREE.JS VISUALIZATION --- */
+function init3D() {
+    const container = document.createElement('div');
+    container.style.position = 'absolute';
+    container.style.left = '420px'; 
+    container.style.top = '0';
+    container.style.width = 'calc(100% - 420px)';
+    container.style.height = '100%';
+    document.body.appendChild(container);
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x202025);
+
+    camera = new THREE.PerspectiveCamera(45, container.offsetWidth / container.offsetHeight, 0.0001, 0.1);
+    camera.position.set(-0.001, 0.0025, 0.0045);
+    camera.lookAt(0.0025, 0, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.offsetWidth, container.offsetHeight);
+    container.appendChild(renderer.domElement);
+
+    const ambLight = new THREE.AmbientLight(0x404040, 2);
+    scene.add(ambLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+    dirLight.position.set(-0.005, 0.01, 0.005);
+    scene.add(dirLight);
+
+    // Gun
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.0005, 0.0005, 0.0005), new THREE.MeshStandardMaterial({ color: 0x555555 }));
+    gun.position.set(-0.0005, 0, 0);
+    scene.add(gun);
+
+    // Capacitor 1 (Y-Deflection) - Initial Setup
+    updateCapacitorVisuals(); 
+
+    // Capacitor 2 (Z-Deflection for Task 5)
+    cap2Group = new THREE.Group();
+    const cap2Len = 0.0005; 
+    const plateGeo2 = new THREE.BoxGeometry(cap2Len, 0.002, 0.00005);
+    const plateMat2 = new THREE.MeshStandardMaterial({ color: 0x6666ff, metalness: 0.8 });
+    const leftPlate = new THREE.Mesh(plateGeo2, plateMat2);
+    const rightPlate = new THREE.Mesh(plateGeo2, plateMat2);
+    cap2Group.add(leftPlate, rightPlate);
+    cap2Group.visible = false;
+    scene.add(cap2Group);
+
+    // Paper
+    const paperGeo = new THREE.PlaneGeometry(0.01, 0.01); 
+    const paperMat = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+    paperMesh = new THREE.Mesh(paperGeo, paperMat);
+    paperMesh.position.set(cfg.D, 0, 0);
+    paperMesh.rotation.y = -Math.PI / 2;
+    scene.add(paperMesh);
+
+    animate();
+}
+
+function updateCapacitorVisuals() {
+    // Remove old cap1 if exists
+    if(cap1Group) scene.remove(cap1Group);
+    
+    cap1Group = new THREE.Group();
+    const plateGeo = new THREE.BoxGeometry(cfg.L1, 0.00005, 0.002);
+    const plateMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.8 });
+    
+    // Position logic based on diagram: D - L2 - L1
+    const cap1End = cfg.D - cfg.L2;
+    const cap1Start = cap1End - cfg.L1;
+    const cap1Center = cap1Start + cfg.L1/2;
+
+    const topPlate = new THREE.Mesh(plateGeo, plateMat);
+    topPlate.position.set(cap1Center, cfg.W/2, 0);
+    const botPlate = new THREE.Mesh(plateGeo, plateMat);
+    botPlate.position.set(cap1Center, -cfg.W/2, 0);
+    cap1Group.add(topPlate, botPlate);
+    scene.add(cap1Group);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    
+    const dt = 2e-6; 
+    const steps = 10; 
+
+    for(let s=0; s<steps; s++) {
+        activeDroplets.forEach(drop => {
+            if(drop.isDead) return;
+
+            drop.mesh.position.x += drop.vx * dt;
+            drop.mesh.position.y += drop.vy * dt;
+            drop.mesh.position.z += drop.vz * dt;
+
+            const x = drop.mesh.position.x;
+            const cap1End = cfg.D - cfg.L2;
+            const cap1Start = cap1End - cfg.L1;
+
+            if (x >= cap1Start && x <= cap1End) {
+                drop.vy += ((cfg.q * drop.vY) / (mass * cfg.W)) * dt;
+            }
+
+            if (isDrawingH) {
+                const cap2Start = cap1End + 0.0002;
+                const cap2Len = 0.0005; 
+                const cap2End = cap2Start + cap2Len;
+                if (x >= cap2Start && x <= cap2End) {
+                    drop.vz += ((cfg.q * drop.vZ) / (mass * cfg.W)) * dt;
+                }
+            }
+
+            if (x >= cfg.D) {
+                drop.isDead = true;
+                scene.remove(drop.mesh);
+                addInkMark(drop.mesh.position.y, drop.mesh.position.z);
+            }
+        });
+    }
+    activeDroplets = activeDroplets.filter(d => !d.isDead);
+    renderer.render(scene, camera);
+}
+
+function addInkMark(y, z) {
+    const dot = new THREE.Mesh(
+        new THREE.CircleGeometry(cfg.d/2, 8), 
+        new THREE.MeshBasicMaterial({ color: 0x000000 })
+    );
+    dot.position.set(z, y, 0.0001); 
+    dot.rotation.z = Math.PI/2;
+    paperMesh.add(dot);
+    inkMarks.push(dot);
+}
+
+function log(msg, append=false) {
+    const el = document.getElementById('output');
+    if (append) {
+        el.innerHTML += msg + "\n";
+    } else {
+        el.innerHTML = msg + "\n";
+    }
+}
+
+function spawnDroplet(vY, vZ=0) {
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(cfg.d/2, 8, 8), new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+    scene.add(mesh);
+    activeDroplets.push({ mesh, vx: cfg.vx, vy: 0, vz: 0, vY, vZ, isDead: false });
+}
+
+function resetSim() {
+    cfg = { ...DEFAULT_CONFIG };
+    initPhysics();
+    updateCapacitorVisuals(); // Reset visual geometry
+    isDrawingH = false;
+    cap2Group.visible = false;
+}
+
+function clearInk() {
+    inkMarks.forEach(m => paperMesh.remove(m));
+    inkMarks = [];
+    activeDroplets.forEach(d => scene.remove(d.mesh));
+    activeDroplets = [];
+}
+
+/* --- TASKS --- */
+
+function runTask1() {
+    resetSim(); clearInk();
+    const time = (cfg.D / cfg.vx) * 1e6;
+    log(`Task 1: No Voltage`);
+    log(`Flight Time: ${time.toFixed(2)} µs`, true);
+    spawnDroplet(0,0);
+    plotGraph([0, time/1e6], [0, 0], "Voltage (0V)");
+}
+
+function runTask2() {
+    resetSim(); clearInk();
+    const results = calculateScenarioResults();
+    
+    log(`Task 2 & 3: Drawing 'I'`);
+    log(`Height: ${(results.h*1000).toFixed(2)} mm`, true);
+    log(`Time: ${(results.time*1000).toFixed(2)} ms`, true);
+    
+    plotGraph(results.tData, results.vData, "Voltage Profile (Standard)");
+    
+    let idx = 0;
+    function loop() {
+        if(idx >= results.vReqs.length) return;
+        spawnDroplet(results.vReqs[idx], 0);
+        idx++;
+        setTimeout(loop, 20);
+    }
+    loop();
+}
+
+function runTask4Sub(subId) {
+    resetSim(); clearInk();
+    
+    let label = "";
+    if(subId === 'a') { cfg.L2 *= 3; label = "4a: L2 (x3)"; }
+    else if (subId === 'b') { cfg.L1 *= 2; label = "4b: L1 (x2)"; }
+    else if (subId === 'c') { cfg.d *= 10; label = "4c: Diameter (x10)"; }
+    else if (subId === 'd') { cfg.vx *= 2; label = "4d: Speed (x2)"; }
+    else if (subId === 'e') { cfg.q *= 5; label = "4e: Charge (x5)"; }
+    
+    initPhysics(); 
+    updateCapacitorVisuals();
+
+    const res = calculateScenarioResults();
+
+    log(`${label}`);
+    log(`Max Height: ${(res.h*1000).toFixed(2)} mm`, true);
+    log(`Total Time: ${(res.time*1000).toFixed(2)} ms`, true);
+    log(`Dots: ${res.numDots}`, true);
+
+    plotGraph(res.tData, res.vData, `V(t) for ${label}`);
+
+    let idx = 0;
+    function loop() {
+        if(idx >= res.vReqs.length) return;
+        spawnDroplet(res.vReqs[idx], 0);
+        idx++;
+        setTimeout(loop, 20); 
+    }
+    loop();
+}
+
+function calculateScenarioResults() {
+    const limY = (cfg.W/2) - (cfg.d/2);
+    const V_max = (2 * limY * mass * cfg.W * Math.pow(cfg.vx,2)) / (Math.abs(cfg.q) * Math.pow(cfg.L1,2));
+    
+    const t_c = cfg.L1/cfg.vx;
+    const t_d = cfg.L2/cfg.vx;
+    const acc = (Math.abs(cfg.q)*V_max)/(mass*cfg.W);
+    const y_exit = 0.5 * acc * t_c * t_c;
+    const vy_exit = acc * t_c;
+    const y_total = y_exit + (vy_exit * t_d);
+    const h_paper = 2 * y_total;
+    
+    let numDots = Math.floor(h_paper / (0.0254/cfg.dpi));
+    if(numDots < 1) numDots = 1;
+
+    const totalTime = (numDots * t_c) + (cfg.D/cfg.vx);
+
+    let vData = [], tData = [], vReqs = [];
+    
+    for(let i=0; i<numDots; i++) {
+        const y_target = y_total - (i * (h_paper/numDots));
+        const v_req = -1 * (y_target / y_total) * V_max;
+        const t_now = i * t_c;
+        vReqs.push(v_req);
+        tData.push(t_now, t_now + t_c);
+        vData.push(v_req, v_req);
+    }
+
+    return { 
+        h: h_paper, time: totalTime, tData: tData, vData: vData, vReqs: vReqs, numDots: numDots
+    };
+}
+
+// --- UPDATED TASK 5 WITH DIMENSIONS & TIME ---
+function runTask5() {
+    resetSim(); clearInk();
+    isDrawingH = true;
+    cap2Group.visible = true;
+
+    // --- Physics Calcs ---
+    // Cap 1 (Height)
+    const limY = (cfg.W/2) - (cfg.d/2);
+    const V_y_max = (2*limY*mass*cfg.W*Math.pow(cfg.vx,2))/(Math.abs(cfg.q)*Math.pow(cfg.L1,2));
+    
+    const t_c1 = cfg.L1/cfg.vx;
+    const t_d1 = cfg.L2/cfg.vx;
+    const acc1 = (Math.abs(cfg.q)*V_y_max)/(mass*cfg.W);
+    const y_total = (0.5*acc1*t_c1*t_c1) + (acc1*t_c1*t_d1);
+    const height_H = 2 * y_total;
+
+    // Cap 2 (Width)
+    // Drift distance for Cap 2 is shorter.
+    const cap2Len = 0.0005;
+    const cap1End = cfg.D - cfg.L2;
+    const cap2Start = cap1End + 0.0002;
+    const dist_cap2_drift = cfg.D - (cap2Start + cap2Len);
+    
+    // Using same voltage max for symmetry
+    const V_z_max = V_y_max; 
+    const t_c2 = cap2Len/cfg.vx;
+    const t_d2 = dist_cap2_drift/cfg.vx;
+    const acc2 = (Math.abs(cfg.q)*V_z_max)/(mass*cfg.W);
+    const z_total = (0.5*acc2*t_c2*t_c2) + (acc2*t_c2*t_d2);
+    const width_H = 2 * z_total;
+
+    // --- Generate Strokes ---
+    let vY_list = [], vZ_list = [], t_list = [];
+    let dotsPerStroke = 15;
+    let Tc = cfg.L1/cfg.vx;
+    let totalDots = 0;
+
+    function addStroke(yStart, yEnd, zStart, zEnd) {
+        for(let i=0; i<=dotsPerStroke; i++) {
+            let f = i/dotsPerStroke;
+            let yInterp = yStart + f*(yEnd-yStart);
+            let zInterp = zStart + f*(zEnd-zStart);
+            vY_list.push( -1 * yInterp * V_y_max ); 
+            vZ_list.push( -1 * zInterp * V_z_max );
+            t_list.push(totalDots * Tc);
+            totalDots++;
+        }
+    }
+
+    addStroke(-1, 1, -1, -1);
+    addStroke(0, 0, -1, 1);
+    addStroke(-1, 1, 1, 1);
+
+    const totalTime = (totalDots * Tc) + (cfg.D/cfg.vx);
+
+    // --- Log Output ---
+    log("Task 5: Drawing 'H'");
+    log(`Height: ${(height_H*1000).toFixed(2)} mm`, true);
+    log(`Width:  ${(width_H*1000).toFixed(2)} mm`, true);
+    log(`Time:   ${(totalTime*1000).toFixed(2)} ms`, true);
+
+    renderChart([
+        { label:'Vy', data: t_list.map((t,i)=>({x:t,y:vY_list[i]})), borderColor:'red', showLine:true },
+        { label:'Vz', data: t_list.map((t,i)=>({x:t,y:vZ_list[i]})), borderColor:'blue', showLine:true }
+    ], "Voltage Profiles for 'H'");
+
+    let idx = 0;
+    function loop() {
+        if(idx >= vY_list.length) return;
+        spawnDroplet(vY_list[idx], vZ_list[idx]);
+        idx++;
+        setTimeout(loop, 30);
+    }
+    loop();
+}
+
+/* --- CHARTING HELPER --- */
+function plotGraph(times, voltages, label) {
+    const dataPoints = times.map((t, i) => ({ x: t, y: voltages[i] }));
+    const dataset = [{
+        label: label,
+        data: dataPoints,
+        borderColor: '#00d2ff',
+        backgroundColor: 'rgba(0, 210, 255, 0.1)',
+        borderWidth: 2,
+        stepped: true,
+        pointRadius: 0,
+        showLine: true
+    }];
+    renderChart(dataset, label);
+}
+
+function renderChart(datasets, title) {
+    const ctx = document.getElementById('voltageChart').getContext('2d');
+    if(chartInstance) chartInstance.destroy();
+    
+    chartInstance = new Chart(ctx, {
+        type: 'scatter',
+        data: { datasets: datasets },
+        options: {
+            responsive: true, 
+            maintainAspectRatio: false, 
+            animation: false,
+            plugins: { 
+                title: { display: true, text: title, color: '#333', padding: {bottom: 5} },
+                legend: { 
+                    display: true,
+                    position: 'top',
+                    align: 'start', 
+                    labels: {
+                        boxWidth: 10, 
+                        padding: 10,
+                        font: { size: 10 } 
+                    }
+                },
+                tooltip: { enabled: true }
+            },
+            scales: {
+                x: { 
+                    type: 'linear', 
+                    title: {display:true, text: 'Time (s)', font:{size:10}},
+                    ticks: { font: {size: 9} }
+                },
+                y: { 
+                    title: {display:true, text: 'Voltage (V)', font:{size:10}},
+                    ticks: { font: {size: 9} }
+                }
+            }
+        }
+    });
+}
+
+initPhysics();
+init3D();
+</script>
+</body>
+</html>
