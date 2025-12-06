@@ -1,3 +1,4 @@
-make sure to put file in a .m script, DO NOT USE live script.
-Simulation is in slow motion.
+Put the code into notepad then save as a .html file
+You can then open in a browser to run
+
 Thank you 
